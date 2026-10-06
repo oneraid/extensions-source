@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.extension.id.mikoroku
 
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -10,6 +11,7 @@ import keiyoushi.annotation.Source
 import keiyoushi.network.get
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.parseAs
+import kotlinx.serialization.json.JsonElement
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.jsoup.Jsoup
@@ -63,15 +65,76 @@ abstract class MikoRoku : KeiSource() {
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val normalizedQuery = query.normalize()
-        if (normalizedQuery.isEmpty() && query.isNotBlank()) return MangasPage(emptyList(), false)
+        var list = fetchCatalog()
 
-        return fetchCatalog()
-            .filter { entry ->
+        if (normalizedQuery.isNotEmpty()) {
+            list = list.filter { entry ->
                 entry.title.normalize().contains(normalizedQuery) ||
                     entry.altTitle.split(";").any { it.normalize().contains(normalizedQuery) }
             }
-            .toMangasPage()
+        }
+
+        var sortOption = 0
+        for (filter in filters) {
+            when (filter) {
+                is SortFilter -> sortOption = filter.state
+                is StatusFilter -> {
+                    if (filter.state > 0) {
+                        val status = filter.values[filter.state].lowercase()
+                        list = list.filter { it.status.equals(status, ignoreCase = true) }
+                    }
+                }
+                is GenreFilter -> {
+                    val included = filter.state.filter { it.isIncluded() }.map { it.name.lowercase() }
+                    val excluded = filter.state.filter { it.isExcluded() }.map { it.name.lowercase() }
+                    if (included.isNotEmpty() || excluded.isNotEmpty()) {
+                        list = list.filter { entry ->
+                            val entryGenres = entry.genres.map { it.lowercase() }
+                            included.all { it in entryGenres } && excluded.none { it in entryGenres }
+                        }
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        list = when (sortOption) {
+            1 -> { // Terbaru
+                val posts = buildList {
+                    addAll(fetchBloggerFeed("https://www.mikodrive.my.id/feeds/posts/default", 500))
+                    addAll(fetchBloggerFeed("https://www.yomidays.my.id/feeds/posts/default", 500))
+                }
+                val slugToDate = mutableMapOf<String, Long>()
+                for (post in posts) {
+                    val postMangaTitle = post.mangaTitleFromPost() ?: continue
+                    val matched = list.firstOrNull { entry ->
+                        titleWordsMatch(postMangaTitle, entry.title) ||
+                            entry.altTitle.split(";").any { alt -> titleWordsMatch(postMangaTitle, alt.trim()) }
+                    } ?: continue
+                    val existing = slugToDate[matched.slug] ?: 0L
+                    if (post.publishedDate > existing) {
+                        slugToDate[matched.slug] = post.publishedDate
+                    }
+                }
+                list.sortedByDescending { slugToDate[it.slug] ?: 0L }
+            }
+            2 -> list.sortedByDescending { it.rating } // Populer (Rating tertinggi)
+            3 -> list.sortedBy { it.rating } // Rating terendah
+            4 -> list.sortedBy { it.title.lowercase() } // Judul A-Z
+            5 -> list.sortedByDescending { it.title.lowercase() } // Judul Z-A
+            else -> list
+        }
+
+        return list.toMangasPage()
     }
+
+    override fun getFilterList(data: JsonElement?): FilterList = FilterList(
+        SortFilter(),
+        Filter.Separator(),
+        StatusFilter(),
+        Filter.Separator(),
+        GenreFilter(),
+    )
 
     private fun List<CatalogEntry>.toMangasPage() = MangasPage(map { it.toSManga() }, false)
 
