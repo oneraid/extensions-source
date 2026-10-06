@@ -60,6 +60,19 @@ internal fun titleWordsMatch(postTitle: String, mangaTitle: String): Boolean {
     }
 }
 
+private const val GITHUB_RAW = "https://raw.githubusercontent.com/moemaomao/mymangadata/main/"
+
+internal fun String?.resolveCover(): String? {
+    if (this.isNullOrBlank() || this.trim() == "-") return null
+    val trimmed = this.trim().removeSuffix(".")
+    val fullUrl = if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+        GITHUB_RAW + trimmed.removePrefix("/")
+    } else {
+        trimmed
+    }
+    return fullUrl.replace(" ", "%20")
+}
+
 @Serializable
 class CatalogEntry(
     val title: String,
@@ -75,7 +88,7 @@ class CatalogEntry(
 ) {
     fun toSManga() = SManga.create().apply {
         title = this@CatalogEntry.title
-        thumbnail_url = img.takeIf { it.isNotBlank() }
+        thumbnail_url = img.resolveCover()
         url = "/detail.html?slug=$slug"
     }
 }
@@ -125,12 +138,30 @@ class BloggerEntryResponse(val entry: BloggerEntry)
 class BloggerText(@SerialName("\$t") val text: String)
 
 @Serializable
+class BloggerMedia(@SerialName("url") val url: String = "")
+
+@Serializable
 class BloggerEntry(
     private val id: BloggerText,
     private val title: BloggerText,
     private val published: BloggerText? = null,
     private val content: BloggerText? = null,
+    @SerialName("media\$thumbnail") private val mediaThumbnail: BloggerMedia? = null,
 ) {
+    // Extract the raw post title (for latest-updates matching).
+    val rawTitle: String get() = title.text
+
+    val publishedDate: Long get() = Instant.tryParse(published?.text)
+
+    // Thumbnail URL from the Blogger post (usable as manga cover fallback).
+    val thumbnailUrl: String? get() = mediaThumbnail?.url?.replace("/s72-c/", "/s400/")?.replace(" ", "%20")?.takeIf { it.isNotBlank() }
+
+    // Manga title portion of the post: strip the trailing "Chapter X" label.
+    fun mangaTitleFromPost(): String? {
+        val label = title.text.chapterLabel() ?: return null
+        return title.text.substringBefore(label).trim().trimEnd('-', '–', ':', ' ').takeIf { it.isNotBlank() }
+    }
+
     fun chapterLabel(mangaTitle: String): String? {
         val postNorm = title.text.normalized()
         val mangaNorm = mangaTitle.normalized()

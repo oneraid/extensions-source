@@ -21,7 +21,45 @@ abstract class MikoRoku : KeiSource() {
         .sortedByDescending { it.rating }
         .toMangasPage()
 
-    override suspend fun getLatestUpdates(page: Int): MangasPage = fetchCatalog().toMangasPage()
+    override suspend fun getLatestUpdates(page: Int): MangasPage {
+        // Fetch most-recent posts from both Blogger mirrors.
+        val posts = buildList {
+            addAll(fetchBloggerFeed("https://www.mikodrive.my.id/feeds/posts/default", 500))
+            addAll(fetchBloggerFeed("https://www.yomidays.my.id/feeds/posts/default", 500))
+        }
+        val catalog = fetchCatalog()
+
+        val seenSlugs = mutableSetOf<String>()
+        val mangas = mutableListOf<SManga>()
+
+        // 1. Group posts by their extracted manga title (newest updates first).
+        for (post in posts.sortedByDescending { it.publishedDate }) {
+            val postMangaTitle = post.mangaTitleFromPost() ?: continue
+            val entry = catalog.firstOrNull { entry ->
+                titleWordsMatch(postMangaTitle, entry.title) ||
+                    entry.altTitle.split(";").any { alt -> titleWordsMatch(postMangaTitle, alt.trim()) }
+            } ?: continue
+            if (seenSlugs.add(entry.slug)) {
+                mangas.add(
+                    entry.toSManga().apply {
+                        // Use blogger post thumbnail as fallback when catalog has no cover.
+                        if (thumbnail_url.isNullOrBlank()) {
+                            thumbnail_url = post.thumbnailUrl
+                        }
+                    },
+                )
+            }
+        }
+
+        // 2. Append remaining catalog manga so no manga is excluded (no limit).
+        for (entry in catalog) {
+            if (seenSlugs.add(entry.slug)) {
+                mangas.add(entry.toSManga())
+            }
+        }
+
+        return MangasPage(mangas, false)
+    }
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val normalizedQuery = query.normalize()
@@ -38,7 +76,8 @@ abstract class MikoRoku : KeiSource() {
     private fun List<CatalogEntry>.toMangasPage() = MangasPage(map { it.toSManga() }, false)
 
     override suspend fun getMangaByUrl(url: HttpUrl): SManga? {
-        if (url.host.removePrefix("www.") != baseUrl.toHttpUrl().host.removePrefix("www.")) return null
+        val host = url.host.removePrefix("www.")
+        if (host != "mikoroku.top" && host != "mikoroku.com") return null
         val slug = url.queryParameter("slug") ?: return null
 
         return buildManga(slug, fetchFirestoreDoc(slug)).apply { initialized = true }
@@ -74,7 +113,7 @@ abstract class MikoRoku : KeiSource() {
             genre = fields.getStringList("genres").takeIf { it.isNotEmpty() }?.joinToString()
                 ?: entry?.genres?.takeIf { it.isNotEmpty() }?.joinToString()
             status = (fields.getString("status") ?: entry?.status).toMangaStatus()
-            thumbnail_url = fields.getString("img").nonBlank() ?: entry?.img.nonBlank()
+            thumbnail_url = fields.getString("img").resolveCover() ?: entry?.img.resolveCover()
         }
     }
 
@@ -265,6 +304,16 @@ abstract class MikoRoku : KeiSource() {
             .addQueryParameter("alt", "json")
             .addQueryParameter("max-results", maxResults.toString())
             .addQueryParameter("q", query)
+            .build()
+
+        return client.get(url).parseAs<BloggerFeedResponse>().feed.entry
+    }
+
+    private suspend fun fetchBloggerFeed(feedUrl: String, maxResults: Int): List<BloggerEntry> {
+        val url = feedUrl.toHttpUrl().newBuilder()
+            .addQueryParameter("alt", "json")
+            .addQueryParameter("max-results", maxResults.toString())
+            .addQueryParameter("orderby", "published")
             .build()
 
         return client.get(url).parseAs<BloggerFeedResponse>().feed.entry

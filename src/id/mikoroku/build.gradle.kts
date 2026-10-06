@@ -6,17 +6,24 @@ plugins {
 
 keiyoushi {
     name = "MikoRoku"
-    versionCode = 22
+    versionCode = 26
     contentWarning = ContentWarning.MIXED
     libVersion = "1.6"
 
     source {
         lang = "id"
-        baseUrl = "https://mikoroku.com"
+        baseUrl {
+            mirrors(
+                "https://mikoroku.top",
+                "https://mikoroku.com",
+            )
+        }
         versionId = 2
     }
 
     deeplink {
+        host("mikoroku.top")
+        host("www.mikoroku.top")
         host("mikoroku.com")
         host("www.mikoroku.com")
         path("/detail.html")
